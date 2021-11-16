@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -44,6 +45,7 @@ const (
 	EnvVaultSkipVerify    = "VAULT_SKIP_VERIFY"
 	EnvVaultNamespace     = "VAULT_NAMESPACE"
 	EnvVaultTLSServerName = "VAULT_TLS_SERVER_NAME"
+	EnvVaultTLSKeyLog     = "VAULT_INSECURE_DEBUG_TLS_KEY_LOG"
 	EnvVaultWrapTTL       = "VAULT_WRAP_TTL"
 	EnvVaultMaxRetries    = "VAULT_MAX_RETRIES"
 	EnvVaultToken         = "VAULT_TOKEN"
@@ -172,6 +174,9 @@ type TLSConfig struct {
 
 	// Insecure enables or disables SSL verification
 	Insecure bool
+
+	// Used to write shared session keys (see crypto/tls's Config.KeyLogWriter).
+	KeyLog io.Writer
 }
 
 // DefaultConfig returns a default configuration for the client. It is
@@ -272,6 +277,10 @@ func (c *Config) ConfigureTLS(t *TLSConfig) error {
 		clientTLSConfig.ServerName = t.TLSServerName
 	}
 
+	if t.KeyLog != nil {
+		clientTLSConfig.KeyLogWriter = t.KeyLog
+	}
+
 	return nil
 }
 
@@ -291,6 +300,7 @@ func (c *Config) ReadEnvironment() error {
 	var envSRVLookup bool
 	var limit *rate.Limiter
 	var envHTTPProxy string
+	var envKeyLog io.Writer
 
 	// Parse the environment variables
 	if v := os.Getenv(EnvVaultAddress); v != "" {
@@ -363,6 +373,21 @@ func (c *Config) ReadEnvironment() error {
 		envHTTPProxy = v
 	}
 
+	// Only read KeyLog file if envInsecure is set. This ensures we don't
+	// accidentally set it when we shouldn't.
+	if envInsecure {
+		if v := os.Getenv(EnvVaultTLSKeyLog); v != "" {
+			// Generally applications using this log (e.g., Wireshark) are smart
+			// enough to try all keys. If we're trying to capture multiple vault
+			// CLI invocations, append rather than truncate.
+			var err error
+			envKeyLog, err = os.OpenFile(v, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
+			if err != nil {
+				return fmt.Errorf("could not open %s: %v", EnvVaultTLSKeyLog, err)
+			}
+		}
+	}
+
 	// Configure the HTTP clients TLS configuration.
 	t := &TLSConfig{
 		CACert:        envCACert,
@@ -371,6 +396,7 @@ func (c *Config) ReadEnvironment() error {
 		ClientKey:     envClientKey,
 		TLSServerName: envTLSServerName,
 		Insecure:      envInsecure,
+		KeyLog:        envKeyLog,
 	}
 
 	c.modifyLock.Lock()
