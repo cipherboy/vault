@@ -2,8 +2,10 @@ package command
 
 import (
 	"fmt"
+	"net/url"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/fatih/color"
@@ -156,4 +158,56 @@ func getWriterFromUI(ui cli.Ui) io.Writer {
 	default:
 		return os.Stdout
 	}
+}
+
+func canonicalizeHost(parsed *url.URL) {
+	// Canonicalization: url.Parse doesn't add missing ports when the URI is
+	// missing one (e.g., http://localhost -> localhost, not localhost:80).
+	// Since we ultimately want to compare with == between left and right,
+	// take the approach of canonicalizing the two URIs.
+	if !strings.ContainsRune(parsed.Host, ':') {
+		switch parsed.Scheme {
+		case "http":
+			parsed.Host += ":80"
+		case "https":
+			parsed.Host += ":443"
+		}
+	}
+
+	// Assumption: localhost==127.0.0.1. While not strictly always, this
+	// avoids a DNS lookup while allowing users to make a concious effort
+	// by using 127.0.0.1 in one URL and 127.0.0.2 in another.
+	pieces := strings.Split(parsed.Host, ":")
+	if pieces[0] == "localhost" {
+		pieces[0] = "127.0.0.1"
+	}
+
+	parsed.Host = strings.Join(pieces, ":")
+}
+
+// Parses two URIs and attempts to determine if they are pointing at the same
+// instance. Conservative in that only highly probable matches return true;
+// other results will return false (including if either URI cannot be parsed).
+// Best effort. :-)
+func compareURIs(left, right string) bool {
+	var err error
+	var left_parsed *url.URL
+	left_parsed, err = url.Parse(left)
+	if err != nil {
+		return false
+	}
+
+	var right_parsed *url.URL
+	right_parsed, err = url.Parse(right)
+	if err != nil {
+		return false
+	}
+
+	// Try to ensure we canonicalize as much as we can before using equality
+	// comparisons.
+	canonicalizeHost(left_parsed)
+	canonicalizeHost(right_parsed)
+
+	// Only condition on scheme and host.
+	return left_parsed.Scheme == right_parsed.Scheme && left_parsed.Host == right_parsed.Host
 }

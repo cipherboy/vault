@@ -713,9 +713,14 @@ func (c *AgentCommand) Run(args []string) int {
 				scheme = "unix://"
 			}
 
+			uri := scheme + ln.Addr().String()
 			infoKey := fmt.Sprintf("api address %d", i+1)
-			info[infoKey] = scheme + ln.Addr().String()
+			info[infoKey] = uri
 			infoKeys = append(infoKeys, infoKey)
+
+			if compareURIs(uri, config.Vault.Address) {
+				c.UI.Warn(fmt.Sprintf("Potentially equal Vault Server (%s) and Agent Listener addresses (%s) could cause connection problems", config.Vault.Address, uri))
+			}
 
 			server := &http.Server{
 				Addr:              ln.Addr().String(),
