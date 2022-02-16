@@ -17,6 +17,8 @@ import (
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/mikesmitty/edkey"
 )
 
 const (
@@ -357,11 +359,7 @@ func generateSSHKeyPair(randomSource io.Reader, keyType string, keyBits int) (st
 			return "", "", err
 		}
 
-		marshalled, err := x509.MarshalPKCS8PrivateKey(privateSeed)
-		if err != nil {
-			return "", "", err
-		}
-
+		marshalled := edkey.MarshalED25519PrivateKey(privateSeed)
 		privateBlock = &pem.Block{
 			Type:    "OPENSSH PRIVATE KEY",
 			Headers: nil,
