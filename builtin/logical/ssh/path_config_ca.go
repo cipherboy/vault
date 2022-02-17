@@ -8,9 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/x509"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 
@@ -18,8 +16,6 @@ import (
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
 	"golang.org/x/crypto/ssh"
-
-	"github.com/mikesmitty/edkey"
 )
 
 const (
@@ -290,8 +286,9 @@ func generateSSHKeyPair(randomSource io.Reader, keyType string, keyBits int) (st
 		randomSource = rand.Reader
 	}
 
+	var err error
+	var privateKey crypto.PrivateKey
 	var publicKey crypto.PublicKey
-	var privateBlock *pem.Block
 
 	switch keyType {
 	case ssh.KeyAlgoRSA, "rsa":
@@ -308,13 +305,8 @@ func generateSSHKeyPair(randomSource io.Reader, keyType string, keyBits int) (st
 			return "", "", err
 		}
 
-		privateBlock = &pem.Block{
-			Type:    "RSA PRIVATE KEY",
-			Headers: nil,
-			Bytes:   x509.MarshalPKCS1PrivateKey(privateSeed),
-		}
-
 		publicKey = privateSeed.Public()
+		privateKey = privateSeed
 	case ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521, "ec":
 		var curve elliptic.Curve
 		switch keyType {
@@ -342,41 +334,26 @@ func generateSSHKeyPair(randomSource io.Reader, keyType string, keyBits int) (st
 			return "", "", err
 		}
 
-		marshalled, err := x509.MarshalECPrivateKey(privateSeed)
-		if err != nil {
-			return "", "", err
-		}
-
-		privateBlock = &pem.Block{
-			Type:    "EC PRIVATE KEY",
-			Headers: nil,
-			Bytes:   marshalled,
-		}
-
 		publicKey = privateSeed.Public()
+		privateKey = privateSeed
 	case ssh.KeyAlgoED25519, "ed25519":
 		_, privateSeed, err := ed25519.GenerateKey(randomSource)
 		if err != nil {
 			return "", "", err
 		}
 
-		marshalled := edkey.MarshalED25519PrivateKey(privateSeed)
-		if marshalled == nil {
-			return "", "", errors.New("unable to marshal ed25519 private key")
-		}
-
-		privateBlock = &pem.Block{
-			Type:    "OPENSSH PRIVATE KEY",
-			Headers: nil,
-			Bytes:   marshalled,
-		}
-
 		publicKey = privateSeed.Public()
+		privateKey = privateSeed
 	default:
 		return "", "", fmt.Errorf("unknown ssh key pair algorithm: %v", keyType)
 	}
 
 	public, err := ssh.NewPublicKey(publicKey)
+	if err != nil {
+		return "", "", err
+	}
+
+	privateBlock, err := ssh.MarshalPrivateKey(privateKey, "")
 	if err != nil {
 		return "", "", err
 	}
