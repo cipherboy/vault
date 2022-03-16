@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+option go_package = "github.com/hashicorp/vault/builtin/logical/pki";
+
+import "google/protobuf/timestamp.proto";
+
+message LWCRLEntry {
+    google.protobuf.Timestamp not_after = 1;
+    google.protobuf.Timestamp revocation_time_utc = 2;
+}
+
+message LWCRL {
+    uint64 version = 1;
+    map<string, LWCRLEntry> entries = 10;
+}

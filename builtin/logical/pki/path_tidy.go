@@ -225,7 +225,12 @@ func (b *backend) pathTidyWrite(ctx context.Context, req *logical.Request, d *fr
 				}
 
 				if rebuildCRL {
-					if err := buildCRL(ctx, b, req, false); err != nil {
+					lwcrl, lwcrlErr := fetchLWCRL(ctx, b, req)
+					if lwcrlErr != nil {
+						return lwcrlErr
+					}
+
+					if err := buildCRL(ctx, b, req, lwcrl, false); err != nil {
 						return err
 					}
 				}

@@ -73,6 +73,7 @@ func Backend(conf *logical.BackendConfig) *backend {
 
 			LocalStorage: []string{
 				"revoked/",
+				"lwcrl",
 				"crl",
 				"certs/",
 			},
@@ -140,6 +141,9 @@ type backend struct {
 
 	tidyStatusLock sync.RWMutex
 	tidyStatus     *tidyStatus
+
+	lwCRLLock    sync.RWMutex
+	presentLWCRL *LWCRL
 }
 
 type (

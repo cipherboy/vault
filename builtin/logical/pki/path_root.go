@@ -259,7 +259,12 @@ func (b *backend) pathCAGenerateRoot(ctx context.Context, req *logical.Request, 
 	}
 
 	// Build a fresh CRL
-	err = buildCRL(ctx, b, req, true)
+	lwcrl, lwcrlErr := fetchLWCRL(ctx, b, req)
+	if lwcrlErr != nil {
+		return nil, fmt.Errorf("error encountered during CRL building: %w", lwcrlErr)
+	}
+
+	err = buildCRL(ctx, b, req, lwcrl, true)
 	if err != nil {
 		return nil, err
 	}

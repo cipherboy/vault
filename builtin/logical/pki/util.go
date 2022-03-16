@@ -2,6 +2,7 @@ package pki
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/hashicorp/vault/sdk/framework"
@@ -20,6 +21,12 @@ func normalizeSerial(serial string) string {
 
 func denormalizeSerial(serial string) string {
 	return strings.Replace(strings.ToLower(serial), "-", ":", -1)
+}
+
+func hexSerialToNum(serial string) (*big.Int, bool) {
+	hexSerial := strings.ReplaceAll(serial, ":", "")
+	hexSerial = strings.ReplaceAll(hexSerial, "-", "")
+	return big.NewInt(0).SetString(hexSerial, 16)
 }
 
 func kmsRequested(input *inputBundle) bool {

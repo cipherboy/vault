@@ -291,14 +291,19 @@ func (b *backend) pathIssueSignCert(ctx context.Context, req *logical.Request, d
 		}
 	}
 
+	normSerial := normalizeSerial(cb.SerialNumber)
 	if !role.NoStore {
 		err = req.Storage.Put(ctx, &logical.StorageEntry{
-			Key:   "certs/" + normalizeSerial(cb.SerialNumber),
+			Key:   "certs/" + normSerial,
 			Value: parsedBundle.CertificateBytes,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("unable to store certificate locally: %w", err)
 		}
+	}
+
+	if err := storeLWCRLEntry(ctx, b, req, normSerial, parsedBundle.Certificate.NotAfter); err != nil {
+		return nil, fmt.Errorf("unable to store lightweight CRL info: %v", err)
 	}
 
 	if useCSR {

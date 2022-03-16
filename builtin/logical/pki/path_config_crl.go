@@ -12,8 +12,9 @@ import (
 
 // CRLConfig holds basic CRL configuration information
 type crlConfig struct {
-	Expiry  string `json:"expiry" mapstructure:"expiry"`
-	Disable bool   `json:"disable"`
+	Expiry      string `json:"expiry" mapstructure:"expiry"`
+	Disable     bool   `json:"disable"`
+	Lightweight bool   `json:"lightweight"`
 }
 
 func pathConfigCRL(b *backend) *framework.Path {
@@ -29,6 +30,10 @@ valid; defaults to 72 hours`,
 			"disable": {
 				Type:        framework.TypeBool,
 				Description: `If set to true, disables generating the CRL entirely.`,
+			},
+			"lightweight": {
+				Type:        framework.TypeBool,
+				Description: `If set to true, enables lightweight CRL storage.`,
 			},
 		},
 
@@ -70,8 +75,9 @@ func (b *backend) pathCRLRead(ctx context.Context, req *logical.Request, data *f
 
 	return &logical.Response{
 		Data: map[string]interface{}{
-			"expiry":  config.Expiry,
-			"disable": config.Disable,
+			"expiry":      config.Expiry,
+			"disable":     config.Disable,
+			"lightweight": config.Lightweight,
 		},
 	}, nil
 }
@@ -100,6 +106,10 @@ func (b *backend) pathCRLWrite(ctx context.Context, req *logical.Request, d *fra
 		config.Disable = disableRaw.(bool)
 	}
 
+	if lightweightRaw, ok := d.GetOk("lightweight"); ok {
+		config.Lightweight = lightweightRaw.(bool)
+	}
+
 	entry, err := logical.StorageEntryJSON("config/crl", config)
 	if err != nil {
 		return nil, err
@@ -110,8 +120,13 @@ func (b *backend) pathCRLWrite(ctx context.Context, req *logical.Request, d *fra
 	}
 
 	if oldDisable != config.Disable {
+		lwcrl, lwcrlErr := fetchLWCRL(ctx, b, req)
+		if lwcrlErr != nil {
+			return nil, fmt.Errorf("error encountered during CRL building: %w", lwcrlErr)
+		}
+
 		// It wasn't disabled but now it is, rotate
-		crlErr := buildCRL(ctx, b, req, true)
+		crlErr := buildCRL(ctx, b, req, lwcrl, true)
 		if crlErr != nil {
 			switch crlErr.(type) {
 			case errutil.UserError:

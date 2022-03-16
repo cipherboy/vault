@@ -68,7 +68,12 @@ func (b *backend) pathRotateCRLRead(ctx context.Context, req *logical.Request, d
 	b.revokeStorageLock.RLock()
 	defer b.revokeStorageLock.RUnlock()
 
-	crlErr := buildCRL(ctx, b, req, false)
+	lwcrl, lwcrlErr := fetchLWCRL(ctx, b, req)
+	if lwcrlErr != nil {
+		return nil, fmt.Errorf("error encountered during CRL building: %w", lwcrlErr)
+	}
+
+	crlErr := buildCRL(ctx, b, req, lwcrl, false)
 	if crlErr != nil {
 		switch crlErr.(type) {
 		case errutil.UserError:
