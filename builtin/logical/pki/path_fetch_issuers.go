@@ -66,6 +66,12 @@ func pathGetIssuer(b *backend) *framework.Path {
 func buildPathGetIssuer(b *backend, pattern string) *framework.Path {
 	fields := map[string]*framework.FieldSchema{}
 	fields = addIssuerRefNameFields(fields)
+	fields["manual_chain"] = &framework.FieldSchema{
+		Type: framework.TypeCommaStringSlice,
+		Description: `Chain of issuer references to use to build this
+issuer's computed CAChain field, when non-empty.`,
+	}
+
 	return &framework.Path{
 		// Returns a JSON entry.
 		Pattern: pattern,
@@ -128,6 +134,8 @@ func (b *backend) pathUpdateIssuer(ctx context.Context, req *logical.Request, da
 		return logical.ErrorResponse(err.Error()), nil
 	}
 
+	newPath := data.Get("manual_chain").([]string)
+
 	ref, err := resolveIssuerReference(ctx, req.Storage, issuerName)
 	if err != nil {
 		return nil, err
@@ -141,9 +149,53 @@ func (b *backend) pathUpdateIssuer(ctx context.Context, req *logical.Request, da
 		return nil, err
 	}
 
+	modified := false
+
 	if newName != issuer.Name {
 		issuer.Name = newName
+		modified = true
+	}
 
+	var updateChain bool
+	var constructedChain []issuerId
+	for index, newPathRef := range newPath {
+		// Allow self for the first entry.
+		if index == 0 && newPathRef == "self" {
+			newPathRef = string(ref)
+		}
+
+		resolvedId, err := resolveIssuerReference(ctx, req.Storage, newPathRef)
+		if err != nil {
+			return nil, err
+		}
+
+		if index == 0 && resolvedId != ref {
+			return logical.ErrorResponse(fmt.Sprintf("expected first cert in chain to be a self-reference, but was: %v/%v", newPathRef, resolvedId)), nil
+		}
+
+		constructedChain = append(constructedChain, resolvedId)
+		if len(issuer.ManualChain) < len(constructedChain) || constructedChain[index] != issuer.ManualChain[index] {
+			updateChain = true
+		}
+	}
+
+	if len(issuer.ManualChain) != len(constructedChain) {
+		updateChain = true
+	}
+
+	if updateChain {
+		issuer.ManualChain = constructedChain
+
+		// Building the chain will write the issuer to disk; no need to do it
+		// twice.
+		modified = false
+		err := rebuildIssuersChains(ctx, req.Storage, issuer)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if modified {
 		err := writeIssuer(ctx, req.Storage, issuer)
 		if err != nil {
 			return nil, err
