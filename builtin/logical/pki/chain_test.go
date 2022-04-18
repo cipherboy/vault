@@ -30,6 +30,15 @@ func (c CBGenerateKey) Run(t *testing.T, client *api.Client, mount string, known
 	knownKeys[c.Name] = resp.Data["private"].(string)
 }
 
+func (c *CBGenerateKey) Deserialize(data []byte) int {
+	if len(data) < 1 || data[0] == 0 {
+		return -1
+	}
+
+	c.Name = fmt.Sprintf("key-%d", int(data[0])%16)
+	return 1
+}
+
 // Generate a root.
 type CBGenerateRoot struct {
 	Key          string
@@ -77,6 +86,20 @@ func (c CBGenerateRoot) Run(t *testing.T, client *api.Client, mount string, know
 	}
 
 	knownCerts[c.Name] = resp.Data["certificate"].(string)
+}
+
+func (c *CBGenerateRoot) Deserialize(data []byte) int {
+	if len(data) < 4 || data[0] == 0 || data[2] == 0 || data[3] == 0 {
+		fmt.Println("Skipping: ", data)
+		return -1
+	}
+
+	c.Key = fmt.Sprintf("key-%d", int(data[0])%16)
+	c.Existing = data[1] < 128
+	c.Name = fmt.Sprintf("issuer-%d", int(data[2])%16)
+	c.CommonName = fmt.Sprintf("name-%d", int(data[3])%16)
+
+	return 4
 }
 
 // Generate an intermediate. Might not really be an intermediate; might be
@@ -167,6 +190,20 @@ func (c CBGenerateIntermediate) Run(t *testing.T, client *api.Client, mount stri
 	}
 }
 
+func (c *CBGenerateIntermediate) Deserialize(data []byte) int {
+	if len(data) < 5 || data[0] == 0 || data[2] == 0 || data[3] == 0 || data[4] == 0 {
+		return -1
+	}
+
+	c.Key = fmt.Sprintf("key-%d", int(data[0])%16)
+	c.Existing = data[1] < 128
+	c.Name = fmt.Sprintf("issuer-%d", int(data[2])%16)
+	c.CommonName = fmt.Sprintf("name-%d", int(data[3])%16)
+	c.Parent = fmt.Sprintf("issuer-%d", int(data[4])%16)
+
+	return 5
+}
+
 // Delete an issuer; breaks chains.
 type CBDeleteIssuer struct {
 	Issuer string
@@ -180,6 +217,16 @@ func (c CBDeleteIssuer) Run(t *testing.T, client *api.Client, mount string, know
 	}
 
 	delete(knownCerts, c.Issuer)
+}
+
+func (c *CBDeleteIssuer) Deserialize(data []byte) int {
+	if len(data) < 1 || data[0] == 0 {
+		return -1
+	}
+
+	c.Issuer = fmt.Sprintf("issuer-%d", int(data[0])%16)
+
+	return 1
 }
 
 // Validate the specified chain exists, by name.
@@ -324,6 +371,45 @@ func (c CBValidateChain) Run(t *testing.T, client *api.Client, mount string, kno
 	}
 }
 
+func (c *CBValidateChain) Deserialize(data []byte) int {
+	if len(data) <= 0 {
+		return -1
+	}
+
+	c.Chains = make(map[string][]string)
+	c.Aliases = make(map[string]string)
+
+	var index = 0
+	for index < len(data) && data[index] != 0 {
+		var thisChain []string
+		var thisIssuer = fmt.Sprintf("issuer-%d", int(data[index])%16)
+		index += 1
+		thisChain = append(thisChain, thisIssuer)
+
+		for index < len(data) && data[index] != 0 {
+			thisChain = append(thisChain, fmt.Sprintf("issuer-%d", int(data[index])%16))
+			index += 1
+
+			if len(thisChain) > 16 {
+				return -1
+			}
+		}
+
+		c.Chains[thisIssuer] = thisChain
+		if len(c.Chains) > 16 {
+			return -1
+		}
+
+		index += 1
+	}
+
+	if index == len(data) && data[index-1] != 0 && data[index-2] != 0 {
+		return -1
+	}
+
+	return index
+}
+
 type CBTestStep interface {
 	Run(t *testing.T, client *api.Client, mount string, knownKeys map[string]string, knownCerts map[string]string)
 }
@@ -332,7 +418,7 @@ type CBTestScenario struct {
 	Steps []CBTestStep
 }
 
-func Test_CAChainBuilding(t *testing.T) {
+func executeTests(t *testing.T, testCases []CBTestScenario) {
 	coreConfig := &vault.CoreConfig{
 		LogicalBackends: map[string]logical.Factory{
 			"pki": Factory,
@@ -346,6 +432,19 @@ func Test_CAChainBuilding(t *testing.T) {
 
 	client := cluster.Cores[0].Client
 
+	for testIndex, testCase := range testCases {
+		mount := fmt.Sprintf("pki-test-%v", testIndex)
+		mountPKIEndpoint(t, client, mount)
+		knownKeys := make(map[string]string)
+		knownCerts := make(map[string]string)
+		for stepIndex, testStep := range testCase.Steps {
+			t.Logf("Running %v / %v", testIndex, stepIndex)
+			testStep.Run(t, client, mount, knownKeys, knownCerts)
+		}
+	}
+}
+
+func Test_CAChainBuilding(t *testing.T) {
 	testCases := []CBTestScenario{
 		{
 			// This test builds up two cliques lined by a cycle, dropping into
@@ -883,15 +982,281 @@ func Test_CAChainBuilding(t *testing.T) {
 		},
 	}
 
-	for testIndex, testCase := range testCases {
-		mount := fmt.Sprintf("pki-test-%v", testIndex)
-		mountPKIEndpoint(t, client, mount)
-		knownKeys := make(map[string]string)
-		knownCerts := make(map[string]string)
-		for stepIndex, testStep := range testCase.Steps {
-			t.Logf("Running %v / %v", testIndex, stepIndex)
-			testStep.Run(t, client, mount, knownKeys, knownCerts)
+	executeTests(t, testCases)
+}
+
+func fuzzingDeserialize(t *testing.T, data []byte) ([]CBTestScenario, bool) {
+	var steps []CBTestStep
+	var index = 0
+
+	if len(data) > 2048 {
+		t.Skip()
+	}
+
+	for index < len(data) {
+		var stepType = int(data[index]) % 2
+		index += 1
+
+		fmt.Printf("data %v - index:%v, stepType: %v - steps: %v\n", data, index, stepType, steps)
+
+		switch stepType {
+		case 1:
+			var step CBGenerateRoot
+			offset := step.Deserialize(data[index:])
+			if offset == -1 {
+				t.Skip()
+			}
+
+			index += offset
+			steps = append(steps, &step)
+		case 2:
+			var step CBGenerateIntermediate
+			offset := step.Deserialize(data[index:])
+			if offset == -1 {
+				t.Skip()
+			}
+
+			index += offset
+			steps = append(steps, &step)
+		/*case 0:
+			var step CBDeleteIssuer
+			offset := step.Deserialize(data[index:])
+			if offset == -1 {
+				t.Skip()
+			}
+
+			index += offset
+			steps = append(steps, step)
+		case 0:
+			var step CBValidateChain
+			offset := step.Deserialize(data[index:])
+			if offset == -1 {
+				t.Skip()
+			}
+
+			index += offset
+			steps = append(steps, step)*/
+		default:
+			t.Skip()
+		}
+	}
+
+	fuzzingValidateSteps(t, steps)
+
+	return []CBTestScenario{
+		CBTestScenario{
+			Steps: steps,
+		},
+	}, true
+}
+
+func fuzzingValidateSteps(t *testing.T, steps []CBTestStep) {
+	for index, untypedStep := range steps {
+		// All keys must be generated once before being used.
+		switch step := untypedStep.(type) {
+		case *CBGenerateRoot:
+			if step.Existing {
+				var existingOk = false
+				if index > 0 {
+					for _, previousUntypedSteps := range steps[0 : index-1] {
+						switch previousStep := previousUntypedSteps.(type) {
+						case *CBGenerateRoot:
+							if previousStep.Key == step.Key {
+								existingOk = true
+								break
+							}
+						case *CBGenerateIntermediate:
+							if previousStep.Key == step.Key {
+								existingOk = true
+								break
+							}
+						}
+
+						if existingOk {
+							break
+						}
+					}
+				}
+
+				if !existingOk {
+					step.Existing = false
+				}
+			} else if !step.Existing {
+				var isExisting = false
+				if index > 0 {
+					for _, previousUntypedSteps := range steps[0 : index-1] {
+						switch previousStep := previousUntypedSteps.(type) {
+						case *CBGenerateRoot:
+							if previousStep.Key == step.Key {
+								isExisting = true
+								break
+							}
+						case *CBGenerateIntermediate:
+							if previousStep.Key == step.Key {
+								isExisting = true
+								break
+							}
+						}
+
+						if isExisting {
+							break
+						}
+					}
+				}
+
+				if isExisting {
+					step.Existing = true
+				}
+			}
+
+			if index == 0 {
+				continue
+			}
+
+			var haveName = false
+            for _, previousUntypedSteps := range steps[0 : index-1] {
+                switch previousStep := previousUntypedSteps.(type) {
+                case *CBGenerateRoot:
+                    if previousStep.Name == step.Name {
+                        haveName = true
+                        break
+                    }
+                case *CBGenerateIntermediate:
+                    if previousStep.Name == step.Name {
+                        haveName = true
+                        break
+                    }
+                }
+
+                if haveName {
+                    break
+                }
+            }
+
+            if !haveName {
+                t.Skip()
+            }
+		case *CBGenerateIntermediate:
+			if step.Existing {
+				var existingOk = false
+				if index > 0 {
+					for _, previousUntypedSteps := range steps[0 : index-1] {
+						switch previousStep := previousUntypedSteps.(type) {
+						case *CBGenerateRoot:
+							if previousStep.Key == step.Key {
+								existingOk = true
+								break
+							}
+						case *CBGenerateIntermediate:
+							if previousStep.Key == step.Key {
+								existingOk = true
+								break
+							}
+						}
+
+						if existingOk {
+							break
+						}
+					}
+				}
+
+				if !existingOk {
+					step.Existing = false
+				}
+			} else if !step.Existing {
+				var isExisting = false
+				if index > 0 {
+					for _, previousUntypedSteps := range steps[0 : index-1] {
+						switch previousStep := previousUntypedSteps.(type) {
+						case *CBGenerateRoot:
+							if previousStep.Key == step.Key {
+								isExisting = true
+								break
+							}
+						case *CBGenerateIntermediate:
+							if previousStep.Key == step.Key {
+								isExisting = true
+								break
+							}
+						}
+
+						if isExisting {
+							break
+						}
+					}
+				}
+
+				if isExisting {
+					step.Existing = true
+				}
+			}
+
+			// Intermediates can't be the first step.
+			if index == 0 {
+				t.Skip()
+			}
+
+			var haveParent = false
+			for _, previousUntypedSteps := range steps[0 : index-1] {
+				switch previousStep := previousUntypedSteps.(type) {
+				case *CBGenerateRoot:
+					if previousStep.Name == step.Parent {
+						haveParent = true
+						break
+					}
+				case *CBGenerateIntermediate:
+					if previousStep.Name == step.Parent {
+						haveParent = true
+						break
+					}
+				}
+
+				if haveParent {
+					break
+				}
+			}
+
+			if !haveParent {
+				t.Skip()
+			}
+
+            var haveName = false
+            for _, previousUntypedSteps := range steps[0 : index-1] {
+                switch previousStep := previousUntypedSteps.(type) {
+                case *CBGenerateRoot:
+                    if previousStep.Name == step.Name {
+                        haveName = true
+                        break
+                    }
+                case *CBGenerateIntermediate:
+                    if previousStep.Name == step.Name {
+                        haveName = true
+                        break
+                    }
+                }
+
+                if haveName {
+                    break
+                }
+            }
+
+            if !haveName {
+                t.Skip()
+            }
+		}
+	}
+}
+
+func FuzzChainBuilding(f *testing.F) {
+	f.Add([]byte{1, 1, 255, 1, 1})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		steps, ok := fuzzingDeserialize(t, data)
+		if !ok {
+			t.Skip()
 		}
 
-	}
+		t.Log(steps)
+		executeTests(t, steps)
+	})
 }
